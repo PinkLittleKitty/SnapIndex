@@ -77,4 +77,5 @@ dependencies {
     implementation (libs.tensorflow.lite)
     implementation (libs.tensorflow.lite.support)
     implementation (libs.kotlinx.serialization.json)
+    implementation (libs.ui.tooling.preview)
 }

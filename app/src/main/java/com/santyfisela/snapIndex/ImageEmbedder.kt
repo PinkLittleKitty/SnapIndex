@@ -12,7 +12,7 @@ import java.nio.ByteOrder
 class ImageEmbedder(context: Context) {
 
     companion object {
-        private const val MODEL_FILENAME = "openai_clip.tflite"
+        private const val MODEL_FILENAME = "mobilenet_v3.tflite"
         private const val IMAGE_SIZE = 224
         private const val EMBEDDING_SIZE = 512
     }

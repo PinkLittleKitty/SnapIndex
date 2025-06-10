@@ -36,6 +36,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.google.accompanist.pager.*
@@ -47,7 +48,10 @@ import java.util.*
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.input.ImeAction
 import kotlinx.coroutines.*
 import kotlin.math.sqrt
 
@@ -152,9 +156,19 @@ fun SnapIndexScreen(
 
     val displayed = remember(photos, search, sortNewest) {
         val sorted = if (sortNewest) photos.sortedByDescending { it.date } else photos.sortedBy { it.date }
-        sorted.filter {
-            val searchableText = it.name + " " + it.metadata.values.joinToString(" ")
-            searchableText.contains(search, ignoreCase = true)
+
+        if (search.isBlank()) {
+            sorted
+        } else {
+            val query = search.trim()
+            sorted.filter { photo ->
+                val searchableText = buildString {
+                    append(photo.name)
+                    append(" ")
+                    append(photo.metadata.values.joinToString(" "))
+                }
+                searchableText.contains(query, ignoreCase = true)
+            }
         }
     }
 
@@ -186,11 +200,22 @@ fun SnapIndexScreen(
                 .fillMaxSize()
         ) {
             AnimatedVisibility(showSearch) {
+                val keyboardController = LocalSoftwareKeyboardController.current
+
                 OutlinedTextField(
                     value = search,
                     onValueChange = { search = it },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Search") }
+                    label = { Text("Search") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions.Default.copy(
+                        imeAction = ImeAction.Search
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onSearch = {
+                            keyboardController?.hide()
+                        }
+                    )
                 )
             }
 
