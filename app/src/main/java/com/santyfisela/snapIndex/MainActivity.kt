@@ -1,0 +1,501 @@
+package com.santyfisela.snapIndex
+
+import android.Manifest
+import android.content.ContentUris
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.provider.DocumentsContract
+import android.provider.MediaStore
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresApi
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
+import com.google.accompanist.pager.*
+import com.santyfisela.snapIndex.ui.theme.SnapIndexTheme
+import kotlinx.coroutines.launch
+import android.media.ExifInterface
+import java.text.SimpleDateFormat
+import java.util.*
+import android.graphics.BitmapFactory
+import kotlinx.coroutines.*
+import kotlin.math.sqrt
+
+
+class MainActivity : ComponentActivity() {
+    @RequiresApi(Build.VERSION_CODES.S)
+    @OptIn(ExperimentalFoundationApi::class)
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            SnapIndexTheme(darkTheme = true, dynamicColor = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    SnapIndexApp()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SnapIndexApp() {
+    val context = LocalContext.current
+    var photos by remember { mutableStateOf<List<Photo>>(emptyList()) }
+    var folderUri by remember { mutableStateOf<Uri?>(null) }
+
+    val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) photos = loadImagesFromDevice(context)
+    }
+
+    val folderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let {
+            context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            folderUri = it
+            photos = loadImagesFromFolder(context, it)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permLauncher.launch(Manifest.permission.READ_MEDIA_IMAGES)
+        } else {
+            permLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+    }
+
+    SnapIndexScreen(
+        photos = photos,
+        onFolderClick = { folderLauncher.launch(null) }
+    )
+}
+
+@OptIn(ExperimentalFoundationApi::class, ExperimentalPagerApi::class, ExperimentalMaterial3Api::class)
+@Composable
+fun SnapIndexScreen(
+    photos: List<Photo>,
+    onFolderClick: () -> Unit
+) {
+    val context = LocalContext.current
+    var search by remember { mutableStateOf("") }
+    var showSearch by remember { mutableStateOf(false) }
+    var sortNewest by remember { mutableStateOf(true) }
+    var showPager by remember { mutableStateOf(false) }
+    var startIndex by remember { mutableStateOf(0) }
+
+    val displayed = remember(photos, search, sortNewest) {
+        val sorted = if (sortNewest) {
+            photos.sortedByDescending { it.date }
+        } else {
+            photos.sortedBy { it.date }
+        }
+
+        sorted.filter {
+            val searchableText = it.name + " " + it.metadata.values.joinToString(" ")
+            searchableText.contains(search, true)
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("SnapIndex") },
+                actions = {
+                    IconButton(onClick = { showSearch = !showSearch }) {
+                        Icon(Icons.Default.Search, contentDescription = "Search")
+                    }
+                    IconButton(onClick = { sortNewest = !sortNewest }) {
+                        Icon(
+                            imageVector = if (sortNewest) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowUp,
+                            contentDescription = "Sort"
+                        )
+                    }
+                    IconButton(onClick = onFolderClick) {
+                        Icon(Icons.Default.Folder, contentDescription = "Select Folder")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(Modifier.padding(padding).padding(16.dp)) {
+            AnimatedVisibility(showSearch) {
+                OutlinedTextField(
+                    value = search,
+                    onValueChange = { search = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Search") }
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(120.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(displayed.size) { i ->
+                    AsyncImage(
+                        model = displayed[i].uri,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(1f)
+                            .clickable {
+                                startIndex = i
+                                showPager = true
+                            }
+                    )
+                }
+            }
+        }
+    }
+
+    if (showPager) {
+        FullscreenPager(
+            images = displayed.map { it.uri },
+            start = startIndex,
+            onDismiss = { showPager = false }
+        )
+    }
+}
+
+fun loadImagesFromDevice(context: Context): MutableList<Photo> {
+    val photos = mutableListOf<Photo>()
+    val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+        MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+    else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+
+    val projection = arrayOf(
+        MediaStore.Images.Media._ID,
+        MediaStore.Images.Media.DISPLAY_NAME,
+        MediaStore.Images.Media.SIZE,
+        MediaStore.Images.Media.DATE_TAKEN
+    )
+
+    val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
+
+    context.contentResolver.query(collection, projection, null, null, sortOrder)?.use { cursor ->
+        val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+        val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+        val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE)
+        val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
+
+        while (cursor.moveToNext()) {
+            val id = cursor.getLong(idCol)
+            val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+            val name = cursor.getString(nameCol)
+            val size = cursor.getLong(sizeCol)
+            val date = cursor.getLong(dateCol)
+
+            val metadata = getImageDetails(context, uri.toString())
+            photos.add(Photo(uri.toString(), name, size, date, metadata))
+        }
+    }
+    return photos
+}
+
+fun loadImagesFromFolder(context: Context, folderUri: Uri): MutableList<Photo> {
+    val photos = mutableListOf<Photo>()
+    val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+        folderUri, DocumentsContract.getTreeDocumentId(folderUri)
+    )
+
+    context.contentResolver.query(
+        childrenUri, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID), null, null, null
+    )?.use { cursor ->
+        val idCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+        while (cursor.moveToNext()) {
+            val docId = cursor.getString(idCol)
+            val docUri = DocumentsContract.buildDocumentUriUsingTree(folderUri, docId)
+
+            if (docUri.toString().endsWith(".jpg", true) || docUri.toString().endsWith(".jpeg", true) || docUri.toString().endsWith(".png", true)) {
+                val metadata = getImageDetails(context, docUri.toString())
+                photos.add(Photo(docUri.toString(), docUri.lastPathSegment ?: "Unknown", 0L, 0L, metadata))
+            }
+        }
+    }
+    return photos
+}
+
+suspend fun loadImagesWithEmbeddings(context: Context): List<Photo> {
+    val photos = mutableListOf<Photo>()
+    val embedder = ImageEmbedder(context)
+
+    val collection =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+
+    val projection = arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DISPLAY_NAME, MediaStore.Images.Media.DATE_TAKEN)
+    val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
+
+    context.contentResolver.query(collection, projection, null, null, sortOrder)?.use { cursor ->
+        val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+        val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+        val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
+
+        while (cursor.moveToNext()) {
+            val id = cursor.getLong(idCol)
+            val name = cursor.getString(nameCol)
+            val date = cursor.getLong(dateCol)
+            val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id).toString()
+
+            val photo = withContext(Dispatchers.IO) {
+                val bitmap = loadBitmapFromUri(context, uri) ?: return@withContext null
+                val embedding = embedder.extractEmbedding(bitmap)
+                Photo(uri, name, 0L, date, emptyMap(), embedding)
+            }
+            photo?.let { photos.add(it) }
+        }
+    }
+
+    embedder.close()
+    return photos
+}
+
+fun loadBitmapFromUri(context: Context, uriString: String): Bitmap? {
+    val uri = Uri.parse(uriString)
+    return try {
+        val inputStream = context.contentResolver.openInputStream(uri)
+        BitmapFactory.decodeStream(inputStream)
+    } catch (e: Exception) {
+        e.printStackTrace()
+        null
+    }
+}
+
+fun findNearestNeighbors(
+    queryEmbedding: FloatArray,
+    photos: List<Photo>,
+    maxResults: Int = 10
+): List<Photo> {
+    return photos
+        .mapNotNull { photo ->
+            val dist = photo.embedding?.let { cosineSimilarity(queryEmbedding, it) }
+            dist?.let { Pair(photo, it) }
+        }
+        .sortedByDescending { it.second }  // cosine similarity higher = closer
+        .take(maxResults)
+        .map { it.first }
+}
+
+// Cosine similarity between two vectors
+fun cosineSimilarity(a: FloatArray, b: FloatArray): Float {
+    var dot = 0f
+    var normA = 0f
+    var normB = 0f
+    for (i in a.indices) {
+        dot += a[i] * b[i]
+        normA += a[i] * a[i]
+        normB += b[i] * b[i]
+    }
+    return dot / ((sqrt(normA) * sqrt(normB)) + 1e-10f)
+}
+
+@OptIn(ExperimentalPagerApi::class, ExperimentalMaterial3Api::class)
+@Composable
+fun FullscreenPager(
+    images: List<String>,
+    start: Int,
+    onDismiss: () -> Unit
+) {
+    val pagerState = rememberPagerState(initialPage = start)
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    val bottomSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var showSheet by remember { mutableStateOf(false) }
+
+    if (showSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showSheet = false },
+            sheetState = bottomSheetState
+        ) {
+            val details = getImageDetails(context, images[pagerState.currentPage])
+
+            Column(Modifier.padding(16.dp)) {
+                Text("Image Details", style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.height(8.dp))
+
+                details.forEach { (key, value) ->
+                    Text("$key: $value")
+                    Spacer(Modifier.height(4.dp))
+                }
+            }
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {},
+                navigationIcon = {
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = {
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "image/*"
+                            putExtra(Intent.EXTRA_STREAM, Uri.parse(images[pagerState.currentPage]))
+                        }
+                        context.startActivity(Intent.createChooser(shareIntent, "Share Image"))
+                    }) {
+                        Icon(Icons.Default.Share, contentDescription = "Share")
+                    }
+                    IconButton(onClick = { showSheet = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "Options")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Black)
+            )
+        }
+    ) { padding ->
+        HorizontalPager(
+            count = images.size,
+            state = pagerState,
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .padding(padding)
+        ) { page ->
+            ZoomableImage(
+                imageUrl = images[page],
+                onDismiss = onDismiss
+            )
+        }
+    }
+}
+
+@Composable
+fun ZoomableImage(imageUrl: String, onDismiss: () -> Unit) {
+    var scale by remember { mutableStateOf(1f) }
+    var offsetX by remember { mutableStateOf(0f) }
+    var offsetY by remember { mutableStateOf(0f) }
+
+    val state = rememberTransformableState { zoomChange, offsetChange, _ ->
+        scale = (scale * zoomChange).coerceIn(1f, 5f)
+        offsetX += offsetChange.x
+        offsetY += offsetChange.y
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onDoubleTap = { if (scale > 1f) scale = 1f else scale = 2f },
+                    onTap = { onDismiss() }
+                )
+            }
+            .pointerInput(Unit) {
+                detectDragGestures { change, dragAmount ->
+                    change.consume()
+                    offsetX += dragAmount.x
+                    offsetY += dragAmount.y
+                }
+            }
+            .transformable(state)
+    ) {
+        AsyncImage(
+            model = imageUrl,
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer(
+                    scaleX = scale,
+                    scaleY = scale,
+                    translationX = offsetX,
+                    translationY = offsetY
+                )
+        )
+    }
+}
+
+fun getImageDetails(context: Context, uri: String): Map<String, String> {
+    val details = mutableMapOf<String, String>()
+    val resolver = context.contentResolver
+    val parsedUri = Uri.parse(uri)
+
+    val cursor = resolver.query(parsedUri, null, null, null, null)
+    cursor?.use {
+        if (it.moveToFirst()) {
+            val nameIndex = it.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
+            val sizeIndex = it.getColumnIndex(MediaStore.Images.Media.SIZE)
+            val dateIndex = it.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
+
+            val name = if (nameIndex != -1) it.getString(nameIndex) else "Unknown"
+            val size = if (sizeIndex != -1) it.getLong(sizeIndex) else 0L
+            val date = if (dateIndex != -1) it.getLong(dateIndex) else 0L
+
+            details["File Name"] = name
+            details["File Size"] = formatFileSize(size)
+            details["Date Taken"] = if (date > 0) SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(date)) else "Unknown"
+        }
+    }
+
+    try {
+        resolver.openInputStream(parsedUri)?.use { inputStream ->
+            val exif = ExifInterface(inputStream)
+
+            val width = exif.getAttributeInt(ExifInterface.TAG_IMAGE_WIDTH, 0)
+            val height = exif.getAttributeInt(ExifInterface.TAG_IMAGE_LENGTH, 0)
+            details["Resolution"] = if (width > 0 && height > 0) "${width}x$height" else "Unknown"
+
+            val latLongArray = FloatArray(2)
+            val hasLatLong = exif.getLatLong(latLongArray)
+            if (hasLatLong) {
+                details["Location"] = "Lat: ${latLongArray[0]}, Lon: ${latLongArray[1]}"
+            } else {
+                details["Location"] = "Unavailable"
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+
+    return details
+}
+
+fun formatFileSize(sizeInBytes: Long): String {
+    val kb = 1024
+    val mb = kb * 1024
+
+    return when {
+        sizeInBytes >= mb -> String.format("%.2f MB", sizeInBytes.toDouble() / mb)
+        sizeInBytes >= kb -> String.format("%.2f KB", sizeInBytes.toDouble() / kb)
+        else -> "$sizeInBytes bytes"
+    }
+}
