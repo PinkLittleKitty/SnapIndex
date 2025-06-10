@@ -39,17 +39,17 @@ class ImageEmbedder(context: Context) {
         return outputBuffer.floatArray
     }
 
-    private fun normalize(buffer: ByteBuffer) {
+    pprivate fun normalize(buffer: ByteBuffer) {
         buffer.rewind()
         val floatBuffer = buffer.asFloatBuffer()
         val size = floatBuffer.capacity()
-        // Input is RGB channels interleaved, repeated per pixel
-        // We'll normalize pixel-wise per channel
+
         val mean = floatArrayOf(0.48145466f, 0.4578275f, 0.40821073f)
         val std = floatArrayOf(0.26862954f, 0.26130258f, 0.27577711f)
 
+        // Iterate over each pixel (3 floats per pixel)
         for (i in 0 until size step 3) {
-            floatBuffer.put(i, (floatBuffer.get(i) - mean[0]) / std[0])     // R
+            floatBuffer.put(i, (floatBuffer.get(i) - mean[0]) / std[0])       // R
             floatBuffer.put(i + 1, (floatBuffer.get(i + 1) - mean[1]) / std[1]) // G
             floatBuffer.put(i + 2, (floatBuffer.get(i + 2) - mean[2]) / std[2]) // B
         }

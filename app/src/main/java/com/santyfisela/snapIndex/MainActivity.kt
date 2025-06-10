@@ -45,6 +45,9 @@ import android.media.ExifInterface
 import java.text.SimpleDateFormat
 import java.util.*
 import android.graphics.BitmapFactory
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.Alignment
 import kotlinx.coroutines.*
 import kotlin.math.sqrt
 
@@ -64,36 +67,96 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SnapIndexApp() {
     val context = LocalContext.current
+
     var photos by remember { mutableStateOf<List<Photo>>(emptyList()) }
-    var folderUri by remember { mutableStateOf<Uri?>(null) }
+    var isLoading by remember { mutableStateOf(false) }
+    var progress by remember { mutableStateOf(0) }
+    var total by remember { mutableStateOf(0) }
+    var selectedFolderUri by remember { mutableStateOf<Uri?>(null) }
 
-    val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) photos = loadImagesFromDevice(context)
-    }
+    val embeddingCache = remember { mutableStateOf<MutableMap<String, FloatArray>>(mutableMapOf()) }
 
-    val folderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let {
-            context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            folderUri = it
-            photos = loadImagesFromFolder(context, it)
-        }
-    }
-
+    // Load cache once on start
     LaunchedEffect(Unit) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            permLauncher.launch(Manifest.permission.READ_MEDIA_IMAGES)
-        } else {
-            permLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+        val loadedCache = EmbeddingCacheManager.loadCache(context)
+        embeddingCache.value = loadedCache
+    }
+
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            selectedFolderUri = uri
         }
     }
 
-    SnapIndexScreen(
-        photos = photos,
-        onFolderClick = { folderLauncher.launch(null) }
-    )
+    // When folderUri changes, load photos with embeddings
+    LaunchedEffect(selectedFolderUri) {
+        selectedFolderUri?.let { folderUri ->
+            isLoading = true
+            progress = 0
+            total = 0
+            photos = emptyList()
+
+            val loadedPhotos = loadImagesWithEmbeddings(
+                context = context,
+                folderUri = folderUri,
+                embeddingCache = embeddingCache,
+                onProgressUpdate = { processed, totalCount ->
+                    progress = processed
+                    total = totalCount
+                }
+            )
+
+            photos = loadedPhotos
+            isLoading = false
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("SnapIndex") },
+                actions = {
+                    IconButton(onClick = { imagePicker.launch(null) }) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = "Select Folder")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        if (isLoading) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                CircularProgressIndicator()
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("Loading images... ($progress/$total)")
+            }
+        } else {
+            if (photos.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(padding),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("No images loaded. Select a folder to begin.")
+                }
+            } else {
+                ImageGallery(
+                    photos = photos,
+                    modifier = Modifier.padding(padding)
+                )
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalPagerApi::class, ExperimentalMaterial3Api::class)
@@ -246,51 +309,62 @@ fun loadImagesFromFolder(context: Context, folderUri: Uri): MutableList<Photo> {
     return photos
 }
 
-suspend fun loadImagesWithEmbeddings(context: Context): List<Photo> {
+suspend fun loadImagesWithEmbeddings(
+    context: Context,
+    folderUri: Uri,
+    embeddingCache: MutableState<MutableMap<String, FloatArray>>,
+    onProgressUpdate: (processed: Int, total: Int) -> Unit
+): List<Photo> = withContext(Dispatchers.IO) {
     val photos = mutableListOf<Photo>()
     val embedder = ImageEmbedder(context)
 
-    val collection =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-        else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+    val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+        folderUri, DocumentsContract.getTreeDocumentId(folderUri)
+    )
 
-    val projection = arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DISPLAY_NAME, MediaStore.Images.Media.DATE_TAKEN)
-    val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
-
-    context.contentResolver.query(collection, projection, null, null, sortOrder)?.use { cursor ->
-        val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-        val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
-        val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
-
+    val imageUris = mutableListOf<Uri>()
+    context.contentResolver.query(
+        childrenUri, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID), null, null, null
+    )?.use { cursor ->
+        val idCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
         while (cursor.moveToNext()) {
-            val id = cursor.getLong(idCol)
-            val name = cursor.getString(nameCol)
-            val date = cursor.getLong(dateCol)
-            val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id).toString()
-
-            val photo = withContext(Dispatchers.IO) {
-                val bitmap = loadBitmapFromUri(context, uri) ?: return@withContext null
-                val embedding = embedder.extractEmbedding(bitmap)
-                Photo(uri, name, 0L, date, emptyMap(), embedding)
+            val docId = cursor.getString(idCol)
+            val docUri = DocumentsContract.buildDocumentUriUsingTree(folderUri, docId)
+            if (docUri.toString().endsWith(".jpg", true) ||
+                docUri.toString().endsWith(".jpeg", true) ||
+                docUri.toString().endsWith(".png", true)) {
+                imageUris.add(docUri)
             }
-            photo?.let { photos.add(it) }
         }
     }
 
-    embedder.close()
-    return photos
-}
+    onProgressUpdate(0, imageUris.size)
 
-fun loadBitmapFromUri(context: Context, uriString: String): Bitmap? {
-    val uri = Uri.parse(uriString)
-    return try {
-        val inputStream = context.contentResolver.openInputStream(uri)
-        BitmapFactory.decodeStream(inputStream)
-    } catch (e: Exception) {
-        e.printStackTrace()
-        null
+    imageUris.forEachIndexed { index, uri ->
+        try {
+            val key = uri.toString()
+            val bitmap = loadBitmapFromUri(context, key)
+            val embedding = embeddingCache.value[key] ?: bitmap?.let {
+                embedder.extractEmbedding(it).also { result ->
+                    // Update cache map (mutable)
+                    embeddingCache.value[key] = result
+                }
+            }
+
+            if (embedding != null) {
+                photos.add(Photo(key, uri.lastPathSegment ?: "Unknown", 0L, 0L, emptyMap(), embedding))
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        onProgressUpdate(index + 1, imageUris.size)
     }
+
+    // Save updated cache after loading
+    EmbeddingCacheManager.saveCache(context, embeddingCache.value)
+
+    photos
 }
 
 fun findNearestNeighbors(
@@ -319,6 +393,18 @@ fun cosineSimilarity(a: FloatArray, b: FloatArray): Float {
         normB += b[i] * b[i]
     }
     return dot / ((sqrt(normA) * sqrt(normB)) + 1e-10f)
+}
+
+fun loadBitmapFromUri(context: Context, uriString: String): Bitmap? {
+    return try {
+        val uri = Uri.parse(uriString)
+        context.contentResolver.openInputStream(uri)?.use { inputStream ->
+            BitmapFactory.decodeStream(inputStream)
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        null
+    }
 }
 
 @OptIn(ExperimentalPagerApi::class, ExperimentalMaterial3Api::class)
@@ -487,6 +573,36 @@ fun getImageDetails(context: Context, uri: String): Map<String, String> {
     }
 
     return details
+}
+
+@Composable
+fun ImageGallery(photos: List<Photo>, modifier: Modifier = Modifier) {
+    LazyColumn(modifier = modifier.fillMaxSize()) {
+        items(photos) { photo ->
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+            ) {
+                Column {
+                    AsyncImage(
+                        model = Uri.parse(photo.uri),
+                        contentDescription = photo.name,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(200.dp)
+                    )
+                    Text(
+                        text = photo.name,
+                        modifier = Modifier.padding(8.dp),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+        }
+    }
 }
 
 fun formatFileSize(sizeInBytes: Long): String {
