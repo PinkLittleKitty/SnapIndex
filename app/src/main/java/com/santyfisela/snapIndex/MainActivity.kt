@@ -67,7 +67,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SnapIndexApp() {
     val context = LocalContext.current
@@ -80,19 +79,24 @@ fun SnapIndexApp() {
 
     val embeddingCache = remember { mutableStateOf<MutableMap<String, FloatArray>>(mutableMapOf()) }
 
-    // Load cache once on start
+    // Load embedding cache once
     LaunchedEffect(Unit) {
         val loadedCache = EmbeddingCacheManager.loadCache(context)
         embeddingCache.value = loadedCache
+
+        // Load last folder URI on app start
+        loadLastFolderUri(context)?.let { lastUri ->
+            selectedFolderUri = lastUri
+        }
     }
 
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
             selectedFolderUri = uri
+            saveLastFolderUri(context, uri)  // Save on new folder selection
         }
     }
 
-    // When folderUri changes, load photos with embeddings
     LaunchedEffect(selectedFolderUri) {
         selectedFolderUri?.let { folderUri ->
             isLoading = true
@@ -115,57 +119,31 @@ fun SnapIndexApp() {
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("SnapIndex") },
-                actions = {
-                    IconButton(onClick = { imagePicker.launch(null) }) {
-                        Icon(Icons.Default.FolderOpen, contentDescription = "Select Folder")
-                    }
-                }
-            )
-        }
-    ) { padding ->
-        if (isLoading) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
+    if (isLoading) {
+        Box(
+            Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 CircularProgressIndicator()
                 Spacer(modifier = Modifier.height(16.dp))
                 Text("Loading images... ($progress/$total)")
             }
-        } else {
-            if (photos.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(padding),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("No images loaded. Select a folder to begin.")
-                }
-            } else {
-                ImageGallery(
-                    photos = photos,
-                    modifier = Modifier.padding(padding)
-                )
-            }
         }
+    } else {
+        SnapIndexScreen(
+            photos = photos,
+            onFolderClick = { imagePicker.launch(null) }
+        )
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class, ExperimentalPagerApi::class, ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun SnapIndexScreen(
     photos: List<Photo>,
     onFolderClick: () -> Unit
 ) {
-    val context = LocalContext.current
     var search by remember { mutableStateOf("") }
     var showSearch by remember { mutableStateOf(false) }
     var sortNewest by remember { mutableStateOf(true) }
@@ -173,15 +151,10 @@ fun SnapIndexScreen(
     var startIndex by remember { mutableStateOf(0) }
 
     val displayed = remember(photos, search, sortNewest) {
-        val sorted = if (sortNewest) {
-            photos.sortedByDescending { it.date }
-        } else {
-            photos.sortedBy { it.date }
-        }
-
+        val sorted = if (sortNewest) photos.sortedByDescending { it.date } else photos.sortedBy { it.date }
         sorted.filter {
             val searchableText = it.name + " " + it.metadata.values.joinToString(" ")
-            searchableText.contains(search, true)
+            searchableText.contains(search, ignoreCase = true)
         }
     }
 
@@ -206,7 +179,12 @@ fun SnapIndexScreen(
             )
         }
     ) { padding ->
-        Column(Modifier.padding(padding).padding(16.dp)) {
+        Column(
+            Modifier
+                .padding(padding)
+                .padding(16.dp)
+                .fillMaxSize()
+        ) {
             AnimatedVisibility(showSearch) {
                 OutlinedTextField(
                     value = search,
@@ -227,7 +205,7 @@ fun SnapIndexScreen(
                 items(displayed.size) { i ->
                     AsyncImage(
                         model = displayed[i].uri,
-                        contentDescription = null,
+                        contentDescription = displayed[i].name,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -573,6 +551,16 @@ fun getImageDetails(context: Context, uri: String): Map<String, String> {
     }
 
     return details
+}
+
+fun saveLastFolderUri(context: Context, uri: Uri) {
+    val prefs = context.getSharedPreferences("snapindex_prefs", Context.MODE_PRIVATE)
+    prefs.edit().putString("last_folder_uri", uri.toString()).apply()
+}
+
+fun loadLastFolderUri(context: Context): Uri? {
+    val prefs = context.getSharedPreferences("snapindex_prefs", Context.MODE_PRIVATE)
+    return prefs.getString("last_folder_uri", null)?.let { Uri.parse(it) }
 }
 
 @Composable

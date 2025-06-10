@@ -39,7 +39,7 @@ class ImageEmbedder(context: Context) {
         return outputBuffer.floatArray
     }
 
-    pprivate fun normalize(buffer: ByteBuffer) {
+    private fun normalize(buffer: ByteBuffer) {
         buffer.rewind()
         val floatBuffer = buffer.asFloatBuffer()
         val size = floatBuffer.capacity()
